@@ -1,0 +1,26 @@
+name: astrbot_plugin_ru_dict
+display_name: 俄语查词助手
+short_desc: 群内 @ 机器人即可查俄语单词、变形和短语
+desc: |
+  俄语单词与短语查询插件，适合俄语学习群、翻译群使用。
+
+  - 查词：词义、词性、重音与 IPA、体（完成体/未完成体）、体对、例句
+  - 屈折反查：直接发变形式也能查到原形（книгами → книга、шёл → идти、люди → человек）
+  - 变形表：名词六格单复数、动词现在时六人称/过去时四性/命令式/形动词/副动词、形容词长尾短尾比较级最高级
+  - 中文释义：可选调用当前大模型提供商把英文释义译成中文，结果本地缓存，同一个词只调一次
+  - 大模型工具：注册 ru_lookup 函数工具，用户用自然语言提问时由模型自行调用
+
+  词库不随仓库分发（307MB）：装好后在 WebUI 插件页点「下载词库」即可从 Release 一键拉取；也可以跑 scripts/ 里的脚本自行构建。插件本身零第三方依赖。
+version: 1.0.0
+author: Mushan3420
+repo: https://github.com/Mushan3420/astrbot_plugin_ru_dict
+astrbot_version: ">=4.5"
+support_platforms:
+  - qq_official
+  - aiocqhttp
+  - telegram
+  - lark
+tags:
+  - 俄语
+  - 词典
+  - 语言学习

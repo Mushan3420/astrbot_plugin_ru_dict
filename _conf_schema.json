@@ -1,0 +1,27 @@
+{
+  "db_path": {
+    "description": "词库路径",
+    "type": "string",
+    "default": "data/ru_dict.db",
+    "hint": "相对路径按 AstrBot 运行目录解析。可以在插件页的「俄语词库」里一键下载，也可以自己跑 scripts/build_db.py 构建"
+  },
+  "db_url": {
+    "description": "词库下载地址",
+    "type": "string",
+    "default": "",
+    "hint": "填 GitHub Release 里 ru_dict.db.gz 的直链。留空则用 https://github.com/Mushan3420/astrbot_plugin_ru_dict/releases/latest/download/ru_dict.db.gz"
+  },
+  "render_mode": {
+    "description": "回复形式",
+    "type": "string",
+    "default": "text",
+    "options": ["text", "image"],
+    "hint": "text 纯文本最稳；image 需要 AstrBot 的文转图(Playwright)可用，且平台支持图片"
+  },
+  "use_llm": {
+    "description": "用大模型把英文释义译成中文",
+    "type": "bool",
+    "default": true,
+    "hint": "关闭则直接返回英文释义。译义会写入 zh_cache 缓存，同一个词只调用一次"
+  }
+}

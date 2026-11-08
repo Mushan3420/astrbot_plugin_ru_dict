@@ -1,0 +1,237 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>俄语词库</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        --bg: #ffffff;
+        --fg: #1f2329;
+        --sub: #646a73;
+        --line: #e5e6eb;
+        --brand: #b5121b;
+        --ok: #1a7f37;
+        --err: #cf222e;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #17181b;
+          --fg: #e8e8ea;
+          --sub: #9aa0a6;
+          --line: #2c2f33;
+        }
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        padding: 24px;
+        background: var(--bg);
+        color: var(--fg);
+        font: 14px/1.6 -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+      }
+      .wrap { max-width: 720px; margin: 0 auto; }
+      h1 {
+        font-size: 18px;
+        margin: 0 0 4px;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+      h1::before {
+        content: "";
+        width: 4px;
+        height: 18px;
+        border-radius: 2px;
+        background: var(--brand);
+      }
+      .hint { color: var(--sub); margin: 0 0 20px; font-size: 13px; }
+      .card {
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        padding: 4px 16px;
+        margin-bottom: 16px;
+      }
+      .row {
+        display: flex;
+        gap: 12px;
+        padding: 9px 0;
+        border-bottom: 1px solid var(--line);
+      }
+      .row:last-child { border-bottom: none; }
+      .k { width: 72px; flex: none; color: var(--sub); }
+      .v { flex: 1; word-break: break-all; }
+      .v.mono { font-family: ui-monospace, Consolas, monospace; font-size: 13px; }
+      .ok { color: var(--ok); }
+      .err { color: var(--err); }
+      button {
+        appearance: none;
+        border: none;
+        border-radius: 8px;
+        background: var(--brand);
+        color: #fff;
+        font-size: 14px;
+        padding: 10px 22px;
+        cursor: pointer;
+      }
+      button:disabled { opacity: 0.5; cursor: not-allowed; }
+      .barWrap {
+        margin-top: 14px;
+        height: 6px;
+        border-radius: 3px;
+        background: var(--line);
+        overflow: hidden;
+      }
+      .barWrap.hidden { display: none; }
+      #bar {
+        height: 100%;
+        width: 0;
+        background: var(--brand);
+        transition: width 0.3s ease;
+      }
+      #msg { margin-top: 10px; font-size: 13px; color: var(--sub); min-height: 20px; }
+      code {
+        font-family: ui-monospace, Consolas, monospace;
+        font-size: 12px;
+        background: rgba(127, 127, 127, 0.12);
+        padding: 1px 5px;
+        border-radius: 4px;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <h1>俄语词库</h1>
+      <p class="hint">
+        插件不含词库，点下面的按钮从 GitHub Release 下载并解压到插件配置的路径，下次重载插件即可直接查词。
+      </p>
+
+      <div class="card">
+        <div class="row"><span class="k">状态</span><span class="v" id="state">读取中…</span></div>
+        <div class="row"><span class="k">路径</span><span class="v mono" id="path">—</span></div>
+        <div class="row"><span class="k">大小</span><span class="v" id="size">—</span></div>
+        <div class="row"><span class="k">词条</span><span class="v" id="entries">—</span></div>
+        <div class="row"><span class="k">词库来源</span><span class="v mono" id="url">—</span></div>
+      </div>
+
+      <button id="btn">下载词库</button>
+
+      <div class="barWrap hidden" id="barWrap"><div id="bar"></div></div>
+      <div id="msg"></div>
+    </div>
+
+    <script type="module">
+      const bridge = window.AstrBotPluginPage;
+      const $ = (id) => document.getElementById(id);
+      const btn = $("btn");
+      let timer = null;
+
+      function fmtSize(n) {
+        if (!n) return "—";
+        const u = ["B", "KB", "MB", "GB"];
+        let i = 0;
+        let v = n;
+        while (v >= 1024 && i < u.length - 1) {
+          v /= 1024;
+          i += 1;
+        }
+        return `${v.toFixed(i ? 1 : 0)} ${u[i]}`;
+      }
+
+      function renderStatus(data) {
+        const db = data.db || {};
+        $("path").textContent = db.path || "—";
+        if (db.exists) {
+          $("state").textContent = db.loaded ? "已就绪" : "文件在，但未加载（重载插件生效）";
+          $("state").className = "v ok";
+        } else {
+          $("state").textContent = "未安装";
+          $("state").className = "v err";
+        }
+        $("size").textContent = db.exists ? `${fmtSize(db.size)}${db.mtime ? " · " + db.mtime : ""}` : "—";
+        $("entries").textContent = db.exists && db.entries ? db.entries.toLocaleString() + " 条" : "—";
+        $("url").textContent = data.url || "未配置下载地址";
+      }
+
+      function renderProgress(d) {
+        if (!d || d.state === "idle") return;
+        const wrap = $("barWrap");
+        wrap.classList.remove("hidden");
+        if (d.total) {
+          $("bar").style.width = `${Math.min(100, (d.bytes / d.total) * 100)}%`;
+        } else if (d.state === "running") {
+          $("bar").style.width = "30%";
+        } else if (d.state === "done") {
+          $("bar").style.width = "100%";
+        }
+        const extra =
+          d.state === "running" && d.speed
+            ? ` · ${fmtSize(d.speed)}/s · 共 ${fmtSize(d.total)}`
+            : "";
+        $("msg").textContent = d.message ? d.message + extra : "";
+        $("msg").className = d.state === "error" ? "err" : "";
+      }
+
+      async function refresh() {
+        try {
+          const res = await bridge.apiGet("status");
+          renderStatus(res);
+          if (res.download && res.download.state !== "idle") {
+            renderProgress(res.download);
+            if (res.download.state === "running") startPolling();
+          }
+        } catch (e) {
+          $("state").textContent = "读取失败：" + e;
+          $("state").className = "v err";
+        }
+      }
+
+      function startPolling() {
+        if (timer) return;
+        timer = setInterval(async () => {
+          try {
+            const res = await bridge.apiGet("progress");
+            renderProgress(res.download);
+            if (res.download.state !== "running") {
+              clearInterval(timer);
+              timer = null;
+              btn.disabled = false;
+              btn.textContent = "下载词库";
+              refresh();
+            }
+          } catch (e) {
+            clearInterval(timer);
+            timer = null;
+            $("msg").textContent = "进度查询失败：" + e;
+          }
+        }, 1000);
+      }
+
+      btn.addEventListener("click", async () => {
+        btn.disabled = true;
+        btn.textContent = "下载中…";
+        $("msg").textContent = "";
+        try {
+          const res = await bridge.apiPost("download", {});
+          if (!res.ok) {
+            btn.disabled = false;
+            btn.textContent = "下载词库";
+            $("msg").textContent = res.message || "下载未能启动";
+            $("msg").className = "err";
+            return;
+          }
+          startPolling();
+        } catch (e) {
+          btn.disabled = false;
+          btn.textContent = "下载词库";
+          $("msg").textContent = "请求失败：" + e;
+          $("msg").className = "err";
+        }
+      });
+
+      await bridge.ready();
+      refresh();
+    </script>
+  </body>
+</html>
