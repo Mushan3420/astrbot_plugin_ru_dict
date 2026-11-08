@@ -112,7 +112,7 @@ LLM_SYSTEM = (
     "astrbot_plugin_ru_dict",
     "Mushan3420",
     "俄语查词助手",
-    "1.1.0",
+    "1.1.1",
     "https://github.com/Mushan3420/astrbot_plugin_ru_dict",
 )
 class RuDictPlugin(Star):

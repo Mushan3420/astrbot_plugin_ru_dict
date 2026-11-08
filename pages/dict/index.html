@@ -435,10 +435,14 @@
         }
       });
 
-      $("check").addEventListener("click", async () => {
+      // 检查远端版本。silent=true 时用于页面加载后的自动探测，不打断用户、不弹错。
+      async function runCheck(opts) {
+        const silent = !!(opts && opts.silent);
         const b = $("check");
-        b.disabled = true;
-        $("latest").textContent = "检查中…";
+        if (!silent) {
+          b.disabled = true;
+          $("latest").textContent = "检查中…";
+        }
         try {
           const res = await bridge.apiGet("check");
           if (res.ok && res.manifest) {
@@ -446,24 +450,30 @@
               version: res.latest,
               built_at: res.manifest.built_at || "",
             };
-            markUpdate(res.latest, res.current);
-            $("latest").textContent = `${res.latest}${res.manifest.built_at ? " · " + res.manifest.built_at : ""}`;
+            // 先把状态重新读一遍：后端可能刚按指纹补写了版本记录，
+            // 不重绘的话「词库版本」行会一直停在「未知」
+            await refresh();
+            markUpdate(res.latest, (state.version || {}).version || res.current);
             $("msg").textContent = res.update_available
               ? `有新版本 ${res.latest}（本机 ${res.current || "未知"}），点「更新词库」即可`
               : res.message;
             $("msg").className = res.update_available ? "err" : "";
-          } else {
+          } else if (!silent) {
             $("latest").textContent = "—";
             $("msg").textContent = res.message || "检查失败";
             $("msg").className = "err";
           }
         } catch (e) {
-          $("msg").textContent = "检查失败：" + e;
-          $("msg").className = "err";
+          if (!silent) {
+            $("msg").textContent = "检查失败：" + e;
+            $("msg").className = "err";
+          }
         } finally {
-          b.disabled = false;
+          if (!silent) b.disabled = false;
         }
-      });
+      }
+
+      $("check").addEventListener("click", () => runCheck());
 
       pauseBtn.addEventListener("click", async () => {
         pauseBtn.disabled = true;
@@ -508,7 +518,12 @@
       });
 
       await bridge.ready();
-      refresh();
+      await refresh();
+      // 词库已装但没有版本记录（升级前的老库）→ 自动查一次：
+      // 远端内容一致就直接补记版本号，不需要为了看版本再下一次 60 MB
+      if (state.db && state.db.exists && !((state.version || {}).version)) {
+        runCheck({ silent: true });
+      }
     </script>
   </body>
 </html>
