@@ -11,11 +11,26 @@
     "default": "",
     "hint": "填 GitHub Release 里 ru_dict.db.gz 的直链。留空则用 https://github.com/Mushan3420/astrbot_plugin_ru_dict/releases/latest/download/ru_dict.db.gz"
   },
+  "db_manifest_url": {
+    "description": "词库版本清单地址",
+    "type": "string",
+    "default": "",
+    "hint": "留空则自动用 db_url 同目录的 dict_manifest.json（Release 里与 ru_dict.db.gz 放在一起）。清单里有 version / entries / bytes / sha256，插件用它判断「有没有新版本」并在下载后校验文件完整性。换自建仓库或私有源时才需要填。"
+  },
+  "db_mirror": {
+    "description": "词库下载加速地址",
+    "type": "string",
+    "default": "",
+    "hint": "境内下载慢时填这里，留空=直连 GitHub。可填预设 https://gh-proxy.com 、https://gh.dpik.top 、https://edgeone.gh-proxy.com 、https://hk.gh-proxy.com ，也可填自建反代前缀或占位符 https://mirror.example.com/{url}；支持逗号分隔多条，按顺序尝试，失败自动换下一条，最后兜底直连。插件页「俄语词库 → 镜像设置」里选完保存，写的也是这一项。注意：AstrBot 自带的「设置 → 网络 → GitHub 加速地址」只存在浏览器 localStorage，插件页面运行在沙箱 iframe 中读不到，所以不能直接继承。"
+  },
   "render_mode": {
     "description": "回复形式",
     "type": "string",
     "default": "text",
-    "options": ["text", "image"],
+    "options": [
+      "text",
+      "image"
+    ],
     "hint": "text 纯文本最稳；image 需要 AstrBot 的文转图(Playwright)可用，且平台支持图片"
   },
   "use_llm": {

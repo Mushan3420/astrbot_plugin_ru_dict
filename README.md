@@ -40,9 +40,64 @@ AstrBot 插件，给 QQ 官方机器人（也兼容 aiocqhttp / Telegram / 飞�
 2. 解压到 `<db_path>.download` 临时文件
 3. 打开临时库数一遍 `entry` 表，少于 10 万条就判定为坏包/半截包，报错并清理
 4. 校验通过才 `os.replace` 覆盖正式库，然后重开 SQLite 连接（不用重载插件，下一次查词就是新库）
-5. 页面每秒轮询进度，显示已下载 MB 与速度
+5. 页面每秒轮询进度，显示已下载 MB、速度与当前线路
+6. 下载中途可以点「暂停」：按 HTTP Range 断点续传，已下的部分留在 `<db_path>.download.gz`，进度写在 `<db_path>.download.json`，点「继续下载」从断点接着下（换线路、重启插件都能续）
+7. 点「取消下载」则是彻底放弃：任务停下、半截包与续传信息一起清掉，旧词库不受影响，之后可以重新发起
 
 页面上能看到失败原因（HTTP 状态码、解压错误、词条数不足），不会是静默失败。
+
+已知边界：断点续传依赖服务器返回 `206 Partial Content`。GitHub Release 原址和常见的 gh-proxy 加速站都支持（实测 `accept-ranges: bytes`），遇到不支持 Range 的服务器会自动退回整包重下；源文件换成新版（ETag 变化）时同样会整包重下，不会拼出一个坏包。
+
+### 境内下载太慢？
+
+在插件页「俄语词库 → 镜像设置」里选一条加速线路点保存即可，也可以在「插件 → 俄语查词助手 → 配置 → 加速地址 `db_mirror`」里填。两条路写的是同一个配置项 `db_mirror`，重启插件仍生效。填了预设就走 `镜像前缀 + 原始地址`，页面「加速线路」一行会显示当前用的是哪个。
+
+**为什么不能直接继承 AstrBot 的「设置 → 网络 → GitHub 加速地址」**：那个设置只存在浏览器 localStorage 里（AstrBot 后端不落盘）。而 AstrBot 渲染插件页时用的是 `sandbox="allow-scripts allow-forms allow-downloads"` 的 iframe（没有 `allow-same-origin`），页面处于不透明源，访问 `localStorage` 直接抛 `SecurityError`；iframe 从父窗口收到的上下文里也只有主题、语言、插件名，没有加速地址。所以插件读不到那个设置——页面会明确提示这一点，并把设置入口指到 `db_mirror`。
+
+保障措施：
+
+- 镜像失败（404、超时、中途断流、数据不完整）会**自动回退直连**，最后一条永远是 GitHub 原址，不会因为镜像挂了就装不上
+- **换线路不丢进度**：镜像与 GitHub 原址指向同一个对象（实测 ETag 都是 `"0x8DF3D961930DDFD"`），所以换线路时保留半截包，带 `If-Range` 向新线路要 `206` 接着下；只有新线路不认 Range（回 200）才会整包重下
+- 下载进程在收尾时被对端断开、但字节已经齐了，按成功处理，不会白费一次完整下载
+- `db_mirror` 支持逗号分隔多个，按顺序尝试；自建反代、阿里云 OSS 内网域名都能填
+- 加速地址会做校验（只允许 http/https、拒绝内网与回环地址），避免把服务器带去打内网
+
+### 词库版本与更新
+
+词库和插件是**两个版本线**：插件 `metadata.yaml` 里是代码版本，词库用独立版本号（建议就用构建日期，如 `2026.11.08`），写在 Release 里与 `ru_dict.db.gz` 并排放的 `dict_manifest.json`：
+
+```json
+{
+  "version": "2026.11.08",
+  "entries": 438894,
+  "forms": 1584297,
+  "bytes": 62858763,
+  "sha256": "2d71f5a9504848bdad5da286f2f8ecfd85ea934f6b4538249b9f328b7298b54f",
+  "db_bytes": 321785856,
+  "db_sha256": "ae5775ffe4f46821f01fadd3edf633369ea99269ace4e9ce43c7fcb0160f4098",
+  "built_at": "2026-11-08",
+  "asset": "ru_dict.db.gz",
+  "url": "https://github.com/.../releases/download/v1.0.0/ru_dict.db.gz"
+}
+```
+
+插件页的「词库版本」一行显示本机装的版本（来自 `<db_path>.meta.json`），点「检查更新」会按与下载相同的线路（镜像 → 直连）拉这份清单并对比：
+
+- 远端版本更高 → 页面提示「有新版本 X」，主按钮变成「更新词库」
+- 装完把新版本号、词条数、SHA256、安装时间写进 `<db_path>.meta.json`，重启插件也不会丢
+- 每次安装都会校验清单里的 `sha256`；对不上就拒绝覆盖并报错，`<db_path>` 里原来的库仍然可用
+- 升级前的老库没有 `.meta.json`，版本显示「未知」；点「检查更新」时插件会算一遍本机 `db_sha256` 与清单比对，**内容完全一致就直接补记版本号，不用重下 60MB**
+- `sha256` 是 gz 包的指纹（安装前校验用），`db_sha256` 是解压后词库的指纹（判断“本机这份是不是远端那份”用）
+- 清单拉不到（404、网络失败）不影响下载：跳过校验，版本记为「未知」
+- 更新走的是同一套暂停/续传/取消逻辑：换版本时先下到 `<db_path>.download.gz`，校验通过才原子替换
+
+清单可以由脚本生成，不用手写：
+
+```bash
+python3 scripts/make_manifest.py release/ru_dict.db.gz --version 2026.11.08 \
+    --entries 438894 --forms 1584297 \
+    --url https://github.com/Mushan3420/astrbot_plugin_ru_dict/releases/download/v1.0.0/ru_dict.db.gz
+```
 
 ### 仓库作者要做的准备
 
@@ -53,13 +108,15 @@ python3 -c "import sqlite3;c=sqlite3.connect('ru_dict.db');c.execute('PRAGMA wal
 gzip -9 ru_dict.db          # 得到 ru_dict.db.gz，约 120-130MB
 ```
 
-然后在 GitHub 上建 Release（tag 例如 `v1.0.0`），把 `ru_dict.db.gz` 传上去发布即可。这样下载地址就是稳定的：
+然后在 GitHub 上建 Release（tag 例如 `v1.0.0`），把 `ru_dict.db.gz` 和 `dict_manifest.json` 两个附件一起传上去发布。清单用 `scripts/make_manifest.py` 生成（见上一节），少了它插件就只会“能下载”而不会“提示更新”、也不做 SHA256 校验。这样下载地址就是稳定的：
 
 ```
 https://github.com/<你的用户名>/astrbot_plugin_ru_dict/releases/latest/download/ru_dict.db.gz
 ```
 
 仓库地址已经填好（`Mushan3420/astrbot_plugin_ru_dict`），插件默认就走这个 Release 地址，一般不需要改。要换成别处的源，改插件配置里的 `db_url` 即可。
+
+> 提示：`releases/latest/download/` 永远跟随「最新且非预发布」的 Release，发新版本时词库附件得跟着搬一遍。想彻底解耦，可以另建一个固定 tag（如 `dict`）的 Release 只放词库，把 `db_url` 指向 `…/releases/download/dict/ru_dict.db.gz`。
 
 ## 指令
 
@@ -80,6 +137,8 @@ https://github.com/<你的用户名>/astrbot_plugin_ru_dict/releases/latest/down
 |---|---|---|
 | `db_path` | `data/ru_dict.db` | 词库路径，相对路径按 AstrBot 运行目录解析 |
 | `db_url` | 空 | Release 里 `ru_dict.db.gz` 的直链；留空则用代码里的默认地址 |
+| `db_manifest_url` | 空 | 词库版本清单地址；留空自动用 `db_url` 同目录的 `dict_manifest.json` |
+| `db_mirror` | 空 | 下载加速地址，留空=直连 GitHub。可写预设 `https://gh-proxy.com`、`https://gh.dpik.top`、`https://edgeone.gh-proxy.com`、`https://hk.gh-proxy.com`，或占位符 `https://mirror.example.com/{url}`；逗号分隔多个按顺序尝试。插件页的「镜像设置」保存的也是这一项 |
 | `render_mode` | `text` | `text` 纯文本；`image` 走 AstrBot 文转图出词卡（需要 Playwright） |
 | `use_llm` | `true` | 是否调用当前 LLM 提供商把英文释义译成中文 |
 

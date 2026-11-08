@@ -76,6 +76,14 @@
         cursor: pointer;
       }
       button:disabled { opacity: 0.5; cursor: not-allowed; }
+      .actions { display: flex; gap: 10px; align-items: center; }
+      button.ghost {
+        background: transparent;
+        color: var(--sub);
+        border: 1px solid var(--line);
+      }
+      button.ghost:hover { color: var(--err); border-color: var(--err); }
+      .hidden { display: none; }
       .barWrap {
         margin-top: 14px;
         height: 6px;
@@ -91,6 +99,24 @@
         transition: width 0.3s ease;
       }
       #msg { margin-top: 10px; font-size: 13px; color: var(--sub); min-height: 20px; }
+      #trace { font-size: 12px; color: var(--sub); line-height: 1.6; word-break: break-all; }
+      .mirrorBox { border-top: 1px solid var(--line); padding: 12px 0 4px; }
+      .mirrorRow { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+      .mirrorRow .k { width: 72px; flex: none; color: var(--sub); }
+      select, input[type="text"] {
+        background: var(--bg);
+        color: var(--fg);
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 7px 10px;
+        font: inherit;
+      }
+      select { min-width: 210px; }
+      input[type="text"] { flex: 1; min-width: 200px; }
+      button.ghost:not(:hover) { color: var(--fg); }
+      button.small { padding: 7px 14px; font-size: 13px; }
+      .mirrorHint { margin: 8px 0 0; font-size: 12.5px; line-height: 1.7; color: var(--sub); }
+      .mirrorHint.warn { color: var(--err); }
       code {
         font-family: ui-monospace, Consolas, monospace;
         font-size: 12px;
@@ -112,13 +138,34 @@
         <div class="row"><span class="k">路径</span><span class="v mono" id="path">—</span></div>
         <div class="row"><span class="k">大小</span><span class="v" id="size">—</span></div>
         <div class="row"><span class="k">词条</span><span class="v" id="entries">—</span></div>
+        <div class="row">
+          <span class="k">词库版本</span>
+          <span class="v" id="version">—</span>
+          <button id="check" class="ghost small">检查更新</button>
+        </div>
+        <div class="row"><span class="k">最新版本</span><span class="v" id="latest">—</span></div>
         <div class="row"><span class="k">词库来源</span><span class="v mono" id="url">—</span></div>
+        <div class="row"><span class="k">加速线路</span><span class="v" id="route">—</span></div>
+        <div class="mirrorBox">
+          <div class="mirrorRow">
+            <span class="k">镜像设置</span>
+            <select id="mirrorSel"></select>
+            <input type="text" id="mirrorCustom" class="hidden" placeholder="https://gh-proxy.com 或 https://你的域名/{url}" />
+            <button id="mirrorSave" class="ghost small">保存</button>
+          </div>
+          <div class="mirrorHint" id="mirrorHint"></div>
+        </div>
       </div>
 
-      <button id="btn">下载词库</button>
+      <div class="actions">
+        <button id="btn">下载词库</button>
+        <button id="pause" class="ghost hidden">暂停</button>
+        <button id="cancel" class="ghost hidden">取消下载</button>
+      </div>
 
       <div class="barWrap hidden" id="barWrap"><div id="bar"></div></div>
       <div id="msg"></div>
+      <div id="trace"></div>
     </div>
 
     <script type="module">
@@ -126,6 +173,112 @@
       const $ = (id) => document.getElementById(id);
       const btn = $("btn");
       let timer = null;
+      let state = {};
+      const pauseBtn = $("pause");
+      const cancelBtn = $("cancel");
+
+      // 按当前状态摆按钮：进行中→暂停/取消；暂停或失败但留有半截包→继续/取消；其它→下载。
+      function syncButtons() {
+        const d = state.download || {};
+        const partial = state.partial || {};
+        const running = d.state === "running";
+        const resumable = !running && (d.state === "paused" || partial.exists);
+        btn.disabled = running;
+        const installed = !!(state.db && state.db.exists);
+        btn.textContent = running
+          ? "下载中…"
+          : resumable
+            ? "继续下载"
+            : installed
+              ? "更新词库"
+              : "下载词库";
+        pauseBtn.classList.toggle("hidden", !running);
+        cancelBtn.classList.toggle("hidden", !(running || resumable));
+      }
+
+      // AstrBot 的预设镜像，顺序与 ProxySelector 里的 githubProxies 一致
+      const ASTRBOT_PRESETS = [
+        "https://gh.dpik.top",
+        "https://gh-proxy.com",
+        "https://hk.gh-proxy.com",
+        "https://edgeone.gh-proxy.com",
+      ];
+      const MIRROR_OPTIONS = [
+        ["", "不使用镜像（直连 GitHub）"],
+        ["https://gh-proxy.com", "https://gh-proxy.com"],
+        ["https://gh.dpik.top", "https://gh.dpik.top"],
+        ["https://edgeone.gh-proxy.com", "https://edgeone.gh-proxy.com"],
+        ["https://hk.gh-proxy.com", "https://hk.gh-proxy.com"],
+        ["__custom__", "自定义地址…"],
+      ];
+      const proxyProbe = { value: "", blocked: false, reason: "" };
+
+      // 读 AstrBot「设置 → 网络 → GitHub 加速地址」。
+      // 该设置只存在 WebUI 的 localStorage；但 AstrBot 把插件页放进
+      // sandbox="allow-scripts allow-forms allow-downloads" 的 iframe（没有
+      // allow-same-origin），页面处于不透明源，访问 localStorage 会抛
+      // SecurityError，所以这条继承路径常常读不到，需要页面内自己设置。
+      function astrbotProxy() {
+        proxyProbe.value = "";
+        proxyProbe.blocked = false;
+        try {
+          const radio = String(localStorage.getItem("githubProxyRadioValue") || "0");
+          const control = String(localStorage.getItem("githubProxyRadioControl") || "0");
+          const saved = (localStorage.getItem("selectedGitHubProxy") || "").trim();
+          const custom = (localStorage.getItem("selectedGitHubProxyCustom") || "").trim();
+          let value = "";
+          if (radio === "1") {
+            if (control === "-1") value = saved || custom;
+            else if (/^\d+$/.test(control)) value = ASTRBOT_PRESETS[Number(control)] || saved;
+            else value = saved;
+          }
+          proxyProbe.value = value;
+        } catch (e) {
+          proxyProbe.blocked = true;
+          proxyProbe.reason = (e && e.name) || String(e);
+          proxyProbe.value = "";
+        }
+        return proxyProbe.value;
+      }
+
+      function renderMirrorPicker() {
+        const sel = $("mirrorSel");
+        const custom = $("mirrorCustom");
+        const saved = (state.mirror || "").trim();
+        const known = MIRROR_OPTIONS.some(([v]) => v === saved && v !== "");
+        sel.innerHTML = MIRROR_OPTIONS.map(
+          ([v, label]) => `<option value="${v}">${label}</option>`
+        ).join("");
+        sel.value = saved && !known ? "__custom__" : saved;
+        custom.classList.toggle("hidden", sel.value !== "__custom__");
+        custom.value = saved && !known ? saved : "";
+      }
+
+      function renderRoute() {
+        const pluginMirror = (state.mirror || "").trim();
+        const proxy = astrbotProxy();
+        const route = $("route");
+        const hint = $("mirrorHint");
+        hint.className = "mirrorHint";
+        if (pluginMirror) {
+          route.textContent = `使用已保存的镜像：${pluginMirror}`;
+          hint.textContent =
+            "这条线路存在插件配置 db_mirror 里，重启插件仍然有效；想改就改上面的选择，或到「插件 → 俄语查词助手 → 配置」里编辑 db_mirror。";
+        } else if (proxyProbe.blocked) {
+          route.textContent = "直连 GitHub（读不到 AstrBot 的加速设置）";
+          hint.className = "mirrorHint warn";
+          hint.textContent =
+            "AstrBot 的「设置 → 网络 → GitHub 加速地址」只存在浏览器 localStorage 里，而 AstrBot 把插件页面放在沙箱 iframe 中（没有 allow-same-origin），页面读不到它。请在上面选一条镜像点保存，或到「插件 → 俄语查词助手 → 配置 → 加速地址 db_mirror」里填写。";
+        } else if (!proxy) {
+          route.textContent = "直连 GitHub（AstrBot 未启用加速地址）";
+          hint.textContent =
+            "没有检测到加速地址。可以在上面选一条镜像点保存；或者去 AstrBot「设置 → 网络 → GitHub 加速地址」选好后回到本页点保存以固定下来。";
+        } else {
+          route.textContent = `跟随 AstrBot 设置：${proxy}`;
+          hint.textContent =
+            "已继承 AstrBot 的加速地址。想固定成插件自己的设置，可在上面选同一条线路点保存。";
+        }
+      }
 
       function fmtSize(n) {
         if (!n) return "—";
@@ -152,6 +305,26 @@
         $("size").textContent = db.exists ? `${fmtSize(db.size)}${db.mtime ? " · " + db.mtime : ""}` : "—";
         $("entries").textContent = db.exists && db.entries ? db.entries.toLocaleString() + " 条" : "—";
         $("url").textContent = data.url || "未配置下载地址";
+        const ver = data.version || {};
+        $("version").textContent = db.exists
+          ? `${ver.version || "未知（升级前的旧库）"}${ver.installed_at ? " · 装于 " + ver.installed_at : ""}`
+          : "—";
+        const latest = data.latest;
+        $("latest").textContent = latest && latest.version
+          ? `${latest.version}${latest.built_at ? " · " + latest.built_at : ""}`
+          : "—";
+        markUpdate(latest && latest.version, ver.version);
+      }
+
+      // 本机版本与远端版本不一致时，把「最新版本」标绿并提示可更新
+      function markUpdate(latest, current) {
+        const el = $("latest");
+        if (!latest) {
+          el.className = "v";
+          return;
+        }
+        const fresh = !current || latest.localeCompare(current, undefined, { numeric: true }) > 0;
+        el.className = fresh ? "v ok" : "v";
       }
 
       function renderProgress(d) {
@@ -171,16 +344,22 @@
             : "";
         $("msg").textContent = d.message ? d.message + extra : "";
         $("msg").className = d.state === "error" ? "err" : "";
+        const trace = Array.isArray(d.trace) ? d.trace : [];
+        $("trace").textContent = trace.length ? "线路记录：" + trace.join(" → ") : "";
       }
 
       async function refresh() {
         try {
           const res = await bridge.apiGet("status");
-          renderStatus(res);
+          state = res || {};
+          renderStatus(state);
+          renderMirrorPicker();
+          renderRoute();
           if (res.download && res.download.state !== "idle") {
             renderProgress(res.download);
             if (res.download.state === "running") startPolling();
           }
+          syncButtons();
         } catch (e) {
           $("state").textContent = "读取失败：" + e;
           $("state").className = "v err";
@@ -192,12 +371,12 @@
         timer = setInterval(async () => {
           try {
             const res = await bridge.apiGet("progress");
+            state.download = res.download || {};
             renderProgress(res.download);
+            syncButtons();
             if (res.download.state !== "running") {
               clearInterval(timer);
               timer = null;
-              btn.disabled = false;
-              btn.textContent = "下载词库";
               refresh();
             }
           } catch (e) {
@@ -213,20 +392,118 @@
         btn.textContent = "下载中…";
         $("msg").textContent = "";
         try {
-          const res = await bridge.apiPost("download", {});
+          const res = await bridge.apiPost("download", { proxy: astrbotProxy() });
           if (!res.ok) {
-            btn.disabled = false;
-            btn.textContent = "下载词库";
             $("msg").textContent = res.message || "下载未能启动";
             $("msg").className = "err";
+            syncButtons();
             return;
           }
+          state.download = { state: "running" };
+          syncButtons();
           startPolling();
         } catch (e) {
-          btn.disabled = false;
-          btn.textContent = "下载词库";
           $("msg").textContent = "请求失败：" + e;
           $("msg").className = "err";
+          syncButtons();
+        }
+      });
+
+      $("mirrorSel").addEventListener("change", () => {
+        $("mirrorCustom").classList.toggle("hidden", $("mirrorSel").value !== "__custom__");
+      });
+
+      $("mirrorSave").addEventListener("click", async () => {
+        const sel = $("mirrorSel");
+        const value = sel.value === "__custom__" ? $("mirrorCustom").value.trim() : sel.value;
+        const btn2 = $("mirrorSave");
+        btn2.disabled = true;
+        try {
+          const res = await bridge.apiPost("mirror", { mirror: value });
+          if (res.ok) {
+            state.mirror = res.mirror || value;
+            renderMirrorPicker();
+            renderRoute();
+          }
+          $("msg").textContent = res.message || (res.ok ? "已保存" : "保存失败");
+          $("msg").className = res.ok ? "" : "err";
+        } catch (e) {
+          $("msg").textContent = "保存失败：" + e;
+          $("msg").className = "err";
+        } finally {
+          btn2.disabled = false;
+        }
+      });
+
+      $("check").addEventListener("click", async () => {
+        const b = $("check");
+        b.disabled = true;
+        $("latest").textContent = "检查中…";
+        try {
+          const res = await bridge.apiGet("check");
+          if (res.ok && res.manifest) {
+            state.latest = {
+              version: res.latest,
+              built_at: res.manifest.built_at || "",
+            };
+            markUpdate(res.latest, res.current);
+            $("latest").textContent = `${res.latest}${res.manifest.built_at ? " · " + res.manifest.built_at : ""}`;
+            $("msg").textContent = res.update_available
+              ? `有新版本 ${res.latest}（本机 ${res.current || "未知"}），点「更新词库」即可`
+              : res.message;
+            $("msg").className = res.update_available ? "err" : "";
+          } else {
+            $("latest").textContent = "—";
+            $("msg").textContent = res.message || "检查失败";
+            $("msg").className = "err";
+          }
+        } catch (e) {
+          $("msg").textContent = "检查失败：" + e;
+          $("msg").className = "err";
+        } finally {
+          b.disabled = false;
+        }
+      });
+
+      pauseBtn.addEventListener("click", async () => {
+        pauseBtn.disabled = true;
+        try {
+          const res = await bridge.apiPost("pause", {});
+          $("msg").textContent = res.ok ? "已暂停" : res.message || "暂停失败";
+          $("msg").className = res.ok ? "" : "err";
+          if (res.ok) {
+            if (timer) {
+              clearInterval(timer);
+              timer = null;
+            }
+            refresh();
+          }
+        } catch (e) {
+          $("msg").textContent = "暂停请求失败：" + e;
+          $("msg").className = "err";
+        } finally {
+          pauseBtn.disabled = false;
+        }
+      });
+
+      cancelBtn.addEventListener("click", async () => {
+        cancelBtn.disabled = true;
+        try {
+          const res = await bridge.apiPost("cancel", {});
+          $("msg").textContent = res.ok ? "已取消" : res.message || "取消失败";
+          $("msg").className = res.ok ? "" : "err";
+          if (res.ok) {
+            if (timer) {
+              clearInterval(timer);
+              timer = null;
+            }
+            refresh();
+          }
+        } catch (e) {
+          $("msg").textContent = "取消请求失败：" + e;
+          $("msg").className = "err";
+        } finally {
+          cancelBtn.disabled = false;
         }
       });
 
