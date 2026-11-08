@@ -98,6 +98,7 @@
         background: var(--brand);
         transition: width 0.3s ease;
       }
+      .btnHint { margin-top: 10px; font-size: 12.5px; line-height: 1.7; color: var(--sub); }
       #msg { margin-top: 10px; font-size: 13px; color: var(--sub); min-height: 20px; }
       #trace { font-size: 12px; color: var(--sub); line-height: 1.6; word-break: break-all; }
       .mirrorBox { border-top: 1px solid var(--line); padding: 12px 0 4px; }
@@ -144,6 +145,7 @@
           <button id="check" class="ghost small">检查更新</button>
         </div>
         <div class="row"><span class="k">最新版本</span><span class="v" id="latest">—</span></div>
+        <div class="row"><span class="k">词库完整性</span><span class="v" id="integrity">—</span></div>
         <div class="row"><span class="k">词库来源</span><span class="v mono" id="url">—</span></div>
         <div class="row"><span class="k">加速线路</span><span class="v" id="route">—</span></div>
         <div class="mirrorBox">
@@ -163,6 +165,7 @@
         <button id="cancel" class="ghost hidden">取消下载</button>
       </div>
 
+      <div class="btnHint" id="btnHint"></div>
       <div class="barWrap hidden" id="barWrap"><div id="bar"></div></div>
       <div id="msg"></div>
       <div id="trace"></div>
@@ -178,20 +181,64 @@
       const cancelBtn = $("cancel");
 
       // 按当前状态摆按钮：进行中→暂停/取消；暂停或失败但留有半截包→继续/取消；其它→下载。
+      // 版本号按数字分段比较：2026.11.08 > 2026.10.30
+      function verCmp(a, b) {
+        const seg = (v) =>
+          String(v || "")
+            .split(/[^0-9]+/)
+            .filter(Boolean)
+            .map(Number);
+        const x = seg(a);
+        const y = seg(b);
+        const n = Math.max(x.length, y.length);
+        for (let i = 0; i < n; i += 1) {
+          const m = x[i] || 0;
+          const k = y[i] || 0;
+          if (m !== k) return m > k ? 1 : -1;
+        }
+        return 0;
+      }
+
+      // 按钮按「版本是否最新 + 本机是否完整」摆：
+      // 最新且完整 → 置灰「已是最新」；最新但内容不符 → 「修复词库」；版本落后 → 「更新词库」
       function syncButtons() {
         const d = state.download || {};
         const partial = state.partial || {};
         const running = d.state === "running";
         const resumable = !running && (d.state === "paused" || partial.exists);
-        btn.disabled = running;
         const installed = !!(state.db && state.db.exists);
-        btn.textContent = running
-          ? "下载中…"
-          : resumable
-            ? "继续下载"
-            : installed
-              ? "更新词库"
-              : "下载词库";
+        const cur = (state.version || {}).version || "";
+        const latest = (state.latest || {}).version || "";
+        const integ = state.integrity || {};
+        const upToDate = !!(installed && cur && latest && verCmp(latest, cur) <= 0);
+        let label = "下载词库";
+        let disabled = false;
+        let hint = "";
+        state.btnMode = "download";
+        if (running) {
+          label = "下载中…";
+          disabled = true;
+        } else if (resumable) {
+          label = "继续下载";
+        } else if (!installed) {
+          label = "下载词库";
+        } else if (upToDate && integ.state === "ok") {
+          label = "已是最新";
+          disabled = true;
+          hint = `本机词库 ${cur} 与远端一致、内容完整，不需要再下载`;
+        } else if (upToDate && integ.state === "damaged") {
+          label = "修复词库";
+          hint = `版本是最新的，但本机文件不完整（${integ.reason}），点一下重新下载安装`;
+        } else if (upToDate) {
+          label = "检查更新";
+          state.btnMode = "check";
+          hint = "还没拿到词库清单，先点一下核对版本与完整性";
+        } else {
+          label = "更新词库";
+        }
+        btn.disabled = disabled;
+        btn.textContent = label;
+        $("btnHint").textContent = hint;
         pauseBtn.classList.toggle("hidden", !running);
         cancelBtn.classList.toggle("hidden", !(running || resumable));
       }
@@ -309,6 +356,20 @@
         $("version").textContent = db.exists
           ? `${ver.version || "未知（升级前的旧库）"}${ver.installed_at ? " · 装于 " + ver.installed_at : ""}`
           : "—";
+        const integ = data.integrity || {};
+        if (!db.exists) {
+          $("integrity").textContent = "—";
+          $("integrity").className = "v";
+        } else if (integ.state === "ok") {
+          $("integrity").textContent = `完整（${integ.reason || "与清单一致"}）`;
+          $("integrity").className = "v ok";
+        } else if (integ.state === "damaged") {
+          $("integrity").textContent = `不完整：${integ.reason || "与清单不符"}`;
+          $("integrity").className = "v err";
+        } else {
+          $("integrity").textContent = "待核对（点检查更新）";
+          $("integrity").className = "v";
+        }
         const latest = data.latest;
         $("latest").textContent = latest && latest.version
           ? `${latest.version}${latest.built_at ? " · " + latest.built_at : ""}`
@@ -388,6 +449,10 @@
       }
 
       btn.addEventListener("click", async () => {
+        if (state.btnMode === "check") {
+          await runCheck();
+          return;
+        }
         btn.disabled = true;
         btn.textContent = "下载中…";
         $("msg").textContent = "";
@@ -519,9 +584,10 @@
 
       await bridge.ready();
       await refresh();
-      // 词库已装但没有版本记录（升级前的老库）→ 自动查一次：
-      // 远端内容一致就直接补记版本号，不需要为了看版本再下一次 60 MB
-      if (state.db && state.db.exists && !((state.version || {}).version)) {
+      // 每次打开页面静默查一次（清单在服务端缓存 5 分钟，代价极小）：
+      // 这样才能知道「最新版本」和本机是否完整，按钮才摆得准；
+      // 老库没有版本记录时还能按指纹直接补记，不必为了看版本号再下一次 60 MB
+      if (state.db && state.db.exists) {
         runCheck({ silent: true });
       }
     </script>

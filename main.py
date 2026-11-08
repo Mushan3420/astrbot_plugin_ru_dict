@@ -112,7 +112,7 @@ LLM_SYSTEM = (
     "astrbot_plugin_ru_dict",
     "Mushan3420",
     "俄语查词助手",
-    "1.1.1",
+    "1.1.2",
     "https://github.com/Mushan3420/astrbot_plugin_ru_dict",
 )
 class RuDictPlugin(Star):
@@ -137,6 +137,7 @@ class RuDictPlugin(Star):
             None  # (时间戳, 清单, 线路标签)，5 分钟内复用
         )
         self._db_sha_cache: tuple | None = None
+        self._integrity_cache: tuple | None = None
         self._dl: dict = {
             "state": "idle",
             "bytes": 0,
@@ -279,6 +280,97 @@ class RuDictPlugin(Star):
         self._db_sha_cache = (key, digest)
         return digest
 
+    @staticmethod
+    def _count_forms(path: str) -> int:
+        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        try:
+            return int(conn.execute("SELECT count(*) FROM form").fetchone()[0])
+        finally:
+            conn.close()
+
+    def _integrity(self, manifest: dict | None) -> dict:
+        """本机词库是否完整：按「文件大小 + 表内行数」核对，不做整文件 sha256。
+
+        词库是活库，查词会把中文缓存写进 zh_cache 表，文件字节数必然随使用变化，
+        整文件哈希永远对不上发布值；所以完整性只看结构与内容量，判据是：
+        文件不小于发布的 db_bytes、entry/form 表在、行数与清单的 entries/forms 一致。
+        """
+        if not os.path.exists(self.db_path):
+            return {"state": "missing", "ok": False, "reason": "词库文件不存在"}
+        want_entry = int((manifest or {}).get("entries") or 0)
+        if not manifest or not want_entry:
+            return {
+                "state": "unknown",
+                "ok": False,
+                "reason": "还没拿到词库清单，无法核对",
+            }
+        try:
+            st = os.stat(self.db_path)
+        except OSError as e:
+            return {"state": "unknown", "ok": False, "reason": f"读不到文件信息：{e}"}
+        key = (st.st_mtime, st.st_size, str(manifest.get("version") or ""))
+        if self._integrity_cache and self._integrity_cache[0] == key:
+            return dict(self._integrity_cache[1])
+
+        want_bytes = int(manifest.get("db_bytes") or 0)
+        want_form = int(manifest.get("forms") or 0)
+        if want_bytes and st.st_size < want_bytes:
+            result = {
+                "state": "damaged",
+                "ok": False,
+                "reason": f"文件 {st.st_size} 字节，小于发布的 {want_bytes} 字节，可能没解压完整",
+            }
+        else:
+            try:
+                conn = sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True)
+                try:
+                    tables = {
+                        r[0]
+                        for r in conn.execute(
+                            "SELECT name FROM sqlite_master WHERE type='table'"
+                        )
+                    }
+                    if not {"entry", "form"} <= tables:
+                        result = {
+                            "state": "damaged",
+                            "ok": False,
+                            "reason": "库里缺 entry/form 表，不是完整词库",
+                        }
+                    else:
+                        n_entry = int(
+                            conn.execute("SELECT count(*) FROM entry").fetchone()[0]
+                        )
+                        n_form = int(
+                            conn.execute("SELECT count(*) FROM form").fetchone()[0]
+                        )
+                        problems: list[str] = []
+                        if n_entry != want_entry:
+                            problems.append(f"词条 {n_entry} ≠ 清单 {want_entry}")
+                        if want_form and n_form != want_form:
+                            problems.append(f"词形 {n_form} ≠ 清单 {want_form}")
+                        if problems:
+                            result = {
+                                "state": "damaged",
+                                "ok": False,
+                                "reason": "；".join(problems),
+                            }
+                        else:
+                            result = {
+                                "state": "ok",
+                                "ok": True,
+                                "reason": f"{n_entry} 词条 / {n_form} 词形，与清单一致",
+                            }
+                finally:
+                    conn.close()
+            except Exception as e:  # noqa: BLE001 —— 坏库就是坏库，不能让页面接口挂掉
+                result = {
+                    "state": "damaged",
+                    "ok": False,
+                    "reason": f"库打不开或结构异常：{e}",
+                }
+        self._integrity_cache = (key, result)
+        return dict(result)
+
     def _dict_version(self) -> dict:
         """本机已装词库的版本信息（旧版装的没有 meta，就报未知）。"""
         meta = self._read_meta()
@@ -362,6 +454,9 @@ class RuDictPlugin(Star):
                 "mirror": str(self.config.get("db_mirror") or ""),
                 "partial": self._partial_info(),
                 "version": self._dict_version(),
+                "integrity": self._integrity(
+                    self._manifest_cache[1] if self._manifest_cache else None
+                ),
                 "latest": (
                     {
                         "version": str(self._manifest_cache[1].get("version") or ""),
@@ -392,11 +487,24 @@ class RuDictPlugin(Star):
             or self._version_key(latest) > self._version_key(current["version"])
         )
         adopted = False
-        # 版本号对不上、但文件内容与远端完全相同（比如升级前装的库），
-        # 直接补一条版本记录，不必再下 60MB
-        if newer and manifest.get("db_sha256") and os.path.exists(self.db_path):
+        adopt_by = ""
+        # 版本号对不上、但本机文件确实就是远端那一份（比如升级前装的库），
+        # 直接补一条版本记录，不必再下 60MB。
+        # 先比整文件 sha256；活库被查词写过 zh_cache 后哈希必然漂移，
+        # 这时退一步比结构（文件大小 + 词条/词形行数），同样能确认是同一份词库。
+        if newer and os.path.exists(self.db_path):
             local_sha = self._db_sha()
-            if local_sha and local_sha == str(manifest.get("db_sha256")):
+            if manifest.get("db_sha256") and local_sha == str(
+                manifest.get("db_sha256")
+            ):
+                adopt_by = "文件指纹一致"
+            elif not current["version"] and (
+                self._integrity(manifest).get("state") == "ok"
+            ):
+                # 只对「压根没有版本记录」的老库免下载：已经记了别的版本号的，
+                # 说明内容很可能真的不同（行数碰巧一样不代表同一份），该更新就更新
+                adopt_by = "结构校验一致"
+            if adopt_by:
                 prev = self._read_meta()
                 self._write_meta(
                     {
@@ -407,15 +515,19 @@ class RuDictPlugin(Star):
                         "bytes": os.path.getsize(self.db_path),
                         "sha256": str(manifest.get("sha256") or ""),
                         "db_sha256": local_sha,
+                        "adopted_by": adopt_by,
                         "installed_at": str(prev.get("installed_at") or ""),
-                        "source": str(prev.get("source") or "指纹校验一致"),
+                        "source": str(prev.get("source") or adopt_by),
                     }
                 )
                 adopted = True
                 newer = False
         self._pending_manifest = manifest
         if adopted:
-            msg = f"本机词库与远端 {latest} 完全一致，已补记版本号，不用重新下载"
+            msg = (
+                f"本机词库与远端 {latest} 一致（{adopt_by}），"
+                "已补记版本号，不用重新下载"
+            )
         elif newer:
             msg = f"发现新版本 {latest}"
         else:
@@ -427,6 +539,7 @@ class RuDictPlugin(Star):
                 "latest": latest,
                 "update_available": newer,
                 "manifest": manifest,
+                "integrity": self._integrity(manifest),
                 "message": msg,
             }
         )

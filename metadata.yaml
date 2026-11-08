@@ -11,7 +11,7 @@ desc: |
   - 大模型工具：注册 ru_lookup 函数工具，用户用自然语言提问时由模型自行调用
 
   词库不随仓库分发（307MB）：装好后在 WebUI 插件页点「下载词库」即可从 Release 一键拉取；也可以跑 scripts/ 里的脚本自行构建。插件本身零第三方依赖。
-version: 1.1.1
+version: 1.1.2
 author: Mushan3420
 repo: https://github.com/Mushan3420/astrbot_plugin_ru_dict
 astrbot_version: ">=4.5"
